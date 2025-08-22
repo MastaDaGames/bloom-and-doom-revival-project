@@ -1,0 +1,329 @@
+#include <windows.h>
+#include <tlhelp32.h>
+#include <shellapi.h>
+#include <shlwapi.h>
+#include <string>
+#include <thread>
+#include <chrono>
+#include <atomic>
+
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "shlwapi.lib")
+
+DWORD FindProcessId(const std::wstring& processName) {
+    DWORD processId = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W entry = { 0 };
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(processName.c_str(), entry.szExeFile) == 0) {
+                processId = entry.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return processId;
+}
+
+bool TerminateProcessById(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    if (!hProcess) return false;
+    BOOL result = TerminateProcess(hProcess, 0);
+    CloseHandle(hProcess);
+    return result == TRUE;
+}
+
+bool IsProcessRunning(const wchar_t* processName) {
+    return FindProcessId(processName) != 0;
+}
+
+bool GetExeDir(std::wstring& outDir) {
+    wchar_t exePath[MAX_PATH] = { 0 };
+    if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0) return false;
+    if (!PathRemoveFileSpecW(exePath)) return false;
+    outDir = exePath;
+    return true;
+}
+
+int ShowErrorBox(bool gameRunning, bool launcherRunning) {
+    std::wstring message;
+    std::wstring caption;
+    UINT uType = MB_ICONWARNING | MB_DEFBUTTON2;
+    if (gameRunning && !launcherRunning) {
+        message = L"Game already running.";
+        caption = L"Game Running";
+        uType |= MB_YESNOCANCEL;
+    }
+    else if (!gameRunning && launcherRunning) {
+        message = L"Launcher already running.";
+        caption = L"Launcher Running";
+        uType |= MB_YESNOCANCEL;
+    }
+    else if (gameRunning && launcherRunning) {
+        message = L"Game and Launcher already running.";
+        caption = L"Game and Launcher Running";
+        uType |= MB_YESNOCANCEL;
+    }
+    else return 0;
+    int ret = MessageBoxW(NULL, message.c_str(), caption.c_str(), uType | MB_TOPMOST);
+    switch (ret) {
+    case IDYES:  return gameRunning && launcherRunning ? 4 : 1;
+    case IDNO:   return 2;
+    case IDCANCEL:
+    default:     return 3;
+    }
+}
+
+void AutoGameShutdown() {
+    while (true) {
+        bool foundDialog = false;
+        EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+            wchar_t className[256] = { 0 };
+            GetClassNameW(hwnd, className, 256);
+            if (_wcsicmp(className, L"SubmitDemoBufferWindow") == 0) {
+                wchar_t title[256] = { 0 };
+                GetWindowTextW(hwnd, title, 256);
+                if (std::wstring(title).find(L"Submitting Log") != std::wstring::npos) {
+                    *(bool*)lParam = true;
+                    return FALSE;
+                }
+            }
+            return TRUE;
+            }, (LPARAM)&foundDialog);
+        if (foundDialog) {
+            DWORD pid = FindProcessId(L"Game.exe");
+            if (pid != 0) TerminateProcessById(pid);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+}
+
+void TodMode() {
+    if (IsProcessRunning(L"Game.exe")) return;
+    std::wstring exeDir;
+    if (!GetExeDir(exeDir)) return;
+    std::wstring gamePath = exeDir + L"\\Game.exe";
+    SHELLEXECUTEINFO shExecInfo = { sizeof(SHELLEXECUTEINFO) };
+    shExecInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
+    shExecInfo.lpVerb = L"open";
+    shExecInfo.lpFile = gamePath.c_str();
+    shExecInfo.lpParameters = L"-tod";
+    shExecInfo.nShow = SW_SHOWNORMAL;
+    ShellExecuteEx(&shExecInfo);
+}
+
+void AutoYesClicker() {
+    while (true) {
+        HWND dialogWindow = FindWindowW(L"#32770", L"SexyCache");
+        if (dialogWindow) {
+            HWND yesButton = NULL;
+            EnumChildWindows(dialogWindow, [](HWND hwndChild, LPARAM lParam) -> BOOL {
+                wchar_t className[256] = { 0 }, windowText[256] = { 0 };
+                GetClassNameW(hwndChild, className, 256);
+                GetWindowTextW(hwndChild, windowText, 256);
+                if (_wcsicmp(className, L"Button") == 0 && _wcsicmp(windowText, L"&Yes") == 0) {
+                    *(HWND*)lParam = hwndChild;
+                    return FALSE;
+                }
+                return TRUE;
+                }, (LPARAM)&yesButton);
+            if (yesButton) {
+                SendMessageW(yesButton, BM_CLICK, 0, 0);
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+}
+
+void AutoLoginClicker() {
+    for (int i = 0; i < 100; ++i) {
+        HWND hwndGame = FindWindowW(L"LoginWindow", NULL);
+        if (hwndGame) {
+            HWND hwndLoginBtn = FindWindowExW(hwndGame, NULL, L"Button", L"Login");
+            if (hwndLoginBtn) {
+                SendMessageW(hwndLoginBtn, BM_CLICK, 0, 0);
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
+
+LRESULT CALLBACK FullScreenWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static int dotCount = 0;
+    switch (msg) {
+    case WM_CREATE:
+        SetTimer(hwnd, 1, 500, NULL);
+        return 0;
+    case WM_TIMER:
+        dotCount = (dotCount + 1) % 4;
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        HBRUSH hBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
+        FillRect(hdc, &rc, hBrush);
+        LOGFONT lf = { 0 };
+        lf.lfHeight = 72;
+        lf.lfWeight = FW_BOLD;
+        wcscpy_s(lf.lfFaceName, L"Segoe UI");
+        HFONT hFont = CreateFontIndirectW(&lf);
+        HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+        SetTextColor(hdc, RGB(255, 255, 255));
+        SetBkMode(hdc, TRANSPARENT);
+        int mode = (int)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+        const wchar_t* baseText = (mode == 1) ? L"Loading: Bloom & Doom" : L"Exiting: Bloom & Doom";
+        wchar_t dots[5] = L"    ";
+        for (int i = 0; i < dotCount; ++i) dots[i] = L'.';
+        wchar_t fullText[128];
+        swprintf_s(fullText, L"%s%s", baseText, dots);
+        SIZE size;
+        GetTextExtentPoint32W(hdc, fullText, (int)wcslen(fullText), &size);
+        int x = (rc.right - size.cx) / 2;
+        int y = (rc.bottom - size.cy) / 2;
+        TextOutW(hdc, x, y, fullText, (int)wcslen(fullText));
+        SelectObject(hdc, hOldFont);
+        DeleteObject(hFont);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_DESTROY:
+        KillTimer(hwnd, 1);
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+HWND CreateFullScreenWindow(HINSTANCE hInstance, int mode) {
+    const wchar_t* className = L"BloomDoomFullScreenWnd";
+    WNDCLASSW wc = { 0 };
+    wc.lpfnWndProc = FullScreenWndProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = className;
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    RegisterClassW(&wc);
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, className, L"", WS_POPUP | WS_VISIBLE,
+        0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
+        NULL, NULL, hInstance, NULL);
+    if (hwnd) {
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)mode);
+        UpdateWindow(hwnd);
+    }
+    return hwnd;
+}
+
+int wmain() {
+    HWND hConsole = GetConsoleWindow();
+    if (hConsole) ShowWindow(hConsole, SW_HIDE);
+    HINSTANCE hInstance = GetModuleHandle(NULL);
+    HWND loadingWnd = CreateFullScreenWindow(hInstance, 1);
+    bool gameRunning = IsProcessRunning(L"Game.exe");
+    bool launcherRunning = false;
+    wchar_t exeName[MAX_PATH];
+    GetModuleFileNameW(NULL, exeName, MAX_PATH);
+    std::wstring exeStr(exeName);
+    size_t pos = exeStr.find_last_of(L"\\/");
+    std::wstring exeOnlyName = (pos != std::wstring::npos) ? exeStr.substr(pos + 1) : exeStr;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe = { sizeof(pe) };
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                if (_wcsicmp(pe.szExeFile, exeOnlyName.c_str()) == 0 && pe.th32ProcessID != GetCurrentProcessId()) {
+                    launcherRunning = true;
+                    break;
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+    }
+    while (true) {
+        int res = ShowErrorBox(gameRunning, launcherRunning);
+        if (res == 0) break;
+        if (res == 1) {
+            if (gameRunning) {
+                DWORD pid = FindProcessId(L"Game.exe");
+                if (pid) TerminateProcessById(pid);
+                gameRunning = false;
+            }
+            Sleep(500);
+        }
+        else if (res == 4) {
+            if (gameRunning) {
+                DWORD pid = FindProcessId(L"Game.exe");
+                if (pid) TerminateProcessById(pid);
+                gameRunning = false;
+            }
+            if (launcherRunning) {
+                HANDLE snap2 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if (snap2 != INVALID_HANDLE_VALUE) {
+                    PROCESSENTRY32W pe2 = { sizeof(pe2) };
+                    if (Process32FirstW(snap2, &pe2)) {
+                        do {
+                            if (_wcsicmp(pe2.szExeFile, exeOnlyName.c_str()) == 0 && pe2.th32ProcessID != GetCurrentProcessId()) {
+                                TerminateProcessById(pe2.th32ProcessID);
+                            }
+                        } while (Process32NextW(snap2, &pe2));
+                    }
+                    CloseHandle(snap2);
+                }
+                launcherRunning = false;
+            }
+            Sleep(500);
+        }
+        else if (res == 2) {
+            gameRunning = IsProcessRunning(L"Game.exe");
+            launcherRunning = false;
+            snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (snap != INVALID_HANDLE_VALUE) {
+                PROCESSENTRY32W pe = { sizeof(pe) };
+                if (Process32FirstW(snap, &pe)) {
+                    do {
+                        if (_wcsicmp(pe.szExeFile, exeOnlyName.c_str()) == 0 && pe.th32ProcessID != GetCurrentProcessId()) {
+                            launcherRunning = true;
+                            break;
+                        }
+                    } while (Process32NextW(snap, &pe));
+                }
+                CloseHandle(snap);
+            }
+            if (!gameRunning && !launcherRunning) break;
+        }
+        else {
+            DestroyWindow(loadingWnd);
+            return 0;
+        }
+    }
+    std::atomic<bool> yesClicked = false;
+    std::atomic<bool> loginClicked = false;
+    std::thread shutdownThread(AutoGameShutdown);
+    TodMode();
+    std::thread yesClickerThread([&]() { while (!yesClicked) { AutoYesClicker(); yesClicked = true; } });
+    std::thread loginClickerThread([&]() { while (!loginClicked) { AutoLoginClicker(); loginClicked = true; } });
+    auto startTime = std::chrono::steady_clock::now();
+    while ((!yesClicked || !loginClicked) && std::chrono::steady_clock::now() - startTime < std::chrono::seconds(30))
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    yesClicked = true;
+    loginClicked = true;
+    yesClickerThread.join();
+    loginClickerThread.join();
+    DestroyWindow(loadingWnd);
+    shutdownThread.join();
+    HWND exitingWnd = CreateFullScreenWindow(hInstance, 2);
+    while (IsProcessRunning(L"Game.exe")) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    DestroyWindow(exitingWnd);
+    return 0;
+}
